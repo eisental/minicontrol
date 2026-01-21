@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"rust-analyzer.cargo.target": "riscv32imc-unknown-none-elf",
+		"rust-analyzer.check.command": "clippy",
+		"rust-analyzer.checkOnSave": true
+	}
+}

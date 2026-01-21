@@ -1,5 +1,6 @@
 #![no_std]
 #![no_main]
+#![allow(clippy::style)]
 #![deny(
     clippy::mem_forget,
     reason = "mem::forget is generally not safe to do with esp_hal types, especially those \
@@ -7,9 +8,10 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
-use minicontrol::LongShortPress;
-use minicontrol::LongShortPressEvent;
-use minicontrol::QwiicTwist;
+use minicontrol::press::HoldEvent;
+use minicontrol::press::LongShortPress;
+use minicontrol::press::PressEvent;
+use minicontrol::twist::QwiicTwist;
 
 use defmt::info;
 use embassy_executor::Spawner;
@@ -62,17 +64,13 @@ type Display = Mutex<
         >,
     >,
 >;
-
-#[allow(
-    clippy::large_stack_frames,
-    reason = "it's not unusual to allocate larger buffers etc. in main"
-)]
 type EncoderCountChan = Channel<NoopRawMutex, (i16, i16), 1>;
-type PressEventChan = Channel<NoopRawMutex, LongShortPressEvent, 1>;
+type PressEventChan = Channel<NoopRawMutex, PressEvent, 1>;
 type DisplayFrameBuffer = Mutex<
     NoopRawMutex,
     Framebuffer<Rgb565, RawU16, LittleEndian, 128, 128, { buffer_size::<Rgb565>(128, 128) }>,
 >;
+type Twist = QwiicTwist<I2cDevice<'static, NoopRawMutex, I2c<'static, esp_hal::Async>>>;
 
 #[allow(
     clippy::large_stack_frames,
@@ -140,12 +138,16 @@ async fn main(spawner: Spawner) {
     static ENCODER_COUNT_CHAN: StaticCell<EncoderCountChan> = StaticCell::new();
     static GREEN_BTN_CHAN: StaticCell<PressEventChan> = StaticCell::new();
     static FRAMEBUFFER_SIGNAL: StaticCell<Signal<NoopRawMutex, ()>> = StaticCell::new();
+    static TWIST_LEFT: StaticCell<Twist> = StaticCell::new();
+    static TWIST_RIGHT: StaticCell<Twist> = StaticCell::new();
 
     let display = DISPLAY.init(Mutex::new(display));
     let framebuffer = FRAMEBUFFER.init(Mutex::new(Framebuffer::new()));
     let encoder_count_chan = ENCODER_COUNT_CHAN.init(Channel::new());
     let green_btn_chan = GREEN_BTN_CHAN.init(Channel::new());
     let framebuffer_signal = FRAMEBUFFER_SIGNAL.init(Signal::new());
+    let twist_left = TWIST_LEFT.init(QwiicTwist::new(I2cDevice::new(i2c_bus), 0x3F));
+    let twist_right = TWIST_RIGHT.init(QwiicTwist::new(I2cDevice::new(i2c_bus), 0x45));
 
     // Spawn Tasks
     spawner
@@ -167,7 +169,7 @@ async fn main(spawner: Spawner) {
         .unwrap();
 
     spawner
-        .spawn(encoder_task(i2c_bus, encoder_count_chan))
+        .spawn(encoder_task(twist_left, twist_right, encoder_count_chan))
         .unwrap();
 
     spawner.spawn(mode_switch_task(green_btn_chan)).unwrap();
@@ -186,14 +188,14 @@ async fn mode_switch_task(mode_btn_chan: &'static PressEventChan) {
     // TODO: actually switch modes
     loop {
         match mode_btn_chan.receive().await {
-            LongShortPressEvent::ShortHeld => {
+            PressEvent::Held(HoldEvent::Short) => {
                 info!("short held")
             }
-            LongShortPressEvent::LongHeld => {
+            PressEvent::Held(HoldEvent::Long) => {
                 info!("long held")
             }
-            LongShortPressEvent::Released(dur) => {
-                info!("Released after {}ms", dur.as_millis())
+            PressEvent::Released(hold, dur) => {
+                info!("Released after {}ms held: {:?}", dur.as_millis(), hold)
             }
         }
     }
@@ -215,16 +217,22 @@ async fn display_update_task(
     }
 }
 
-#[embassy_executor::task(pool_size = 2)]
-async fn encoder_task(i2c_bus: &'static I2cBus, encoder_count: &'static EncoderCountChan) {
-    let mut twist_left = QwiicTwist::new(I2cDevice::new(i2c_bus), 0x3F);
-    let mut twist_right = QwiicTwist::new(I2cDevice::new(i2c_bus), 0x45);
+#[embassy_executor::task]
+async fn encoder_task(
+    twist_left: &'static mut Twist,
+    twist_right: &'static mut Twist,
+    encoder_count_chan: &'static EncoderCountChan,
+) {
+    let mut last_left_count = 0i16;
+    let mut last_right_count = 0i16;
 
     loop {
         let left_count = twist_left.get_count().await;
         let right_count = twist_right.get_count().await;
-
-        encoder_count.send((left_count, right_count)).await;
+        if left_count != last_left_count || right_count != last_right_count {
+            encoder_count_chan.send((left_count, right_count)).await;
+            (last_left_count, last_right_count) = (left_count, right_count);
+        }
 
         Timer::after(Duration::from_millis(100)).await;
     }
