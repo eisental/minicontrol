@@ -10,6 +10,8 @@
 
 use embassy_futures::select::Either;
 use embassy_futures::select::select;
+use embassy_futures::yield_now;
+use embedded_graphics::primitives::PrimitiveStyleBuilder;
 use minicontrol::press::HoldEvent;
 use minicontrol::press::LongShortPress;
 use minicontrol::press::PressEvent;
@@ -42,6 +44,7 @@ use embedded_graphics::{
     mono_font::{MonoTextStyle, ascii::FONT_6X10},
     pixelcolor::{Rgb565, raw::LittleEndian},
     prelude::*,
+    primitives::Rectangle,
     text::Text,
 };
 
@@ -103,7 +106,7 @@ async fn main(spawner: Spawner) {
     // SPI Display Setup
     let spi_bus = Spi::new(
         peripherals.SPI2,
-        Config::default().with_frequency(Rate::from_mhz(4)),
+        Config::default().with_frequency(Rate::from_mhz(60)),
     )
     .expect("SPI should be initialized")
     .with_sck(peripherals.GPIO6)
@@ -159,6 +162,10 @@ async fn main(spawner: Spawner) {
             framebuffer,
         ))
         .unwrap();
+
+    // spawner
+    //     .spawn(animation_test_task(framebuffer_signal, framebuffer))
+    //     .unwrap();
 
     spawner
         .spawn(green_button_task(
@@ -322,5 +329,56 @@ async fn display_counts_task(
             }
         }
         framebuffer_signal.signal(());
+    }
+}
+
+#[embassy_executor::task]
+async fn animation_test_task(
+    framebuffer_signal: &'static Signal<NoopRawMutex, ()>,
+    framebuffer: &'static DisplayFrameBuffer,
+) {
+    let rect_style = PrimitiveStyleBuilder::new()
+        .stroke_color(Rgb565::BLUE)
+        .fill_color(Rgb565::GREEN)
+        .build();
+
+    let mut x = 0;
+    let mut y = 0;
+    let mut dx = 1;
+    let mut dy = 1;
+
+    loop {
+        {
+            let mut framebuffer = framebuffer.lock().await;
+            framebuffer.clear(RgbColor::BLACK);
+
+            Rectangle::new(
+                Point { x: x, y: y },
+                Size {
+                    width: 28,
+                    height: 28,
+                },
+            )
+            .into_styled(rect_style)
+            .draw(&mut *framebuffer)
+            .unwrap();
+
+            x += dx;
+            y += dy;
+
+            if x >= 100 {
+                dx = -1
+            } else if x <= 0 {
+                dx = 1
+            }
+            if y >= 100 {
+                dy = -1
+            } else if y <= 0 {
+                dy = 1
+            }
+        }
+
+        framebuffer_signal.signal(());
+        yield_now().await;
     }
 }
