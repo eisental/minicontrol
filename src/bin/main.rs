@@ -8,6 +8,8 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
+use embassy_futures::select::Either;
+use embassy_futures::select::select;
 use minicontrol::press::HoldEvent;
 use minicontrol::press::LongShortPress;
 use minicontrol::press::PressEvent;
@@ -64,13 +66,12 @@ type Display = Mutex<
         >,
     >,
 >;
-type EncoderCountChan = Channel<NoopRawMutex, (i16, i16), 1>;
+type TwistCountChan = Channel<NoopRawMutex, i16, 1>;
 type PressEventChan = Channel<NoopRawMutex, PressEvent, 1>;
 type DisplayFrameBuffer = Mutex<
     NoopRawMutex,
     Framebuffer<Rgb565, RawU16, LittleEndian, 128, 128, { buffer_size::<Rgb565>(128, 128) }>,
 >;
-type Twist = QwiicTwist<I2cDevice<'static, NoopRawMutex, I2c<'static, esp_hal::Async>>>;
 
 #[allow(
     clippy::large_stack_frames,
@@ -129,30 +130,31 @@ async fn main(spawner: Spawner) {
         .with_sda(peripherals.GPIO8)
         .with_scl(peripherals.GPIO9)
         .into_async();
+
     static I2C_BUS: StaticCell<I2cBus> = StaticCell::new();
     let i2c_bus = I2C_BUS.init(Mutex::new(i2c));
 
     // Inter-task Communication
     static DISPLAY: StaticCell<Display> = StaticCell::new();
     static FRAMEBUFFER: StaticCell<DisplayFrameBuffer> = StaticCell::new();
-    static ENCODER_COUNT_CHAN: StaticCell<EncoderCountChan> = StaticCell::new();
+    static LEFT_TWIST_COUNT_CHAN: StaticCell<TwistCountChan> = StaticCell::new();
+    static RIGHT_TWIST_COUNT_CHAN: StaticCell<TwistCountChan> = StaticCell::new();
     static GREEN_BTN_CHAN: StaticCell<PressEventChan> = StaticCell::new();
     static FRAMEBUFFER_SIGNAL: StaticCell<Signal<NoopRawMutex, ()>> = StaticCell::new();
-    static TWIST_LEFT: StaticCell<Twist> = StaticCell::new();
-    static TWIST_RIGHT: StaticCell<Twist> = StaticCell::new();
 
     let display = DISPLAY.init(Mutex::new(display));
     let framebuffer = FRAMEBUFFER.init(Mutex::new(Framebuffer::new()));
-    let encoder_count_chan = ENCODER_COUNT_CHAN.init(Channel::new());
+    let left_twist_count_chan = LEFT_TWIST_COUNT_CHAN.init(Channel::new());
+    let right_twist_count_chan = RIGHT_TWIST_COUNT_CHAN.init(Channel::new());
     let green_btn_chan = GREEN_BTN_CHAN.init(Channel::new());
     let framebuffer_signal = FRAMEBUFFER_SIGNAL.init(Signal::new());
-    let twist_left = TWIST_LEFT.init(QwiicTwist::new(I2cDevice::new(i2c_bus), 0x3F));
-    let twist_right = TWIST_RIGHT.init(QwiicTwist::new(I2cDevice::new(i2c_bus), 0x45));
 
     // Spawn Tasks
+
     spawner
         .spawn(display_counts_task(
-            encoder_count_chan,
+            left_twist_count_chan,
+            right_twist_count_chan,
             framebuffer_signal,
             framebuffer,
         ))
@@ -169,7 +171,21 @@ async fn main(spawner: Spawner) {
         .unwrap();
 
     spawner
-        .spawn(encoder_task(twist_left, twist_right, encoder_count_chan))
+        .spawn(count_twist_task(
+            i2c_bus,
+            0x3F,
+            left_twist_count_chan,
+            Duration::from_millis(100),
+        ))
+        .unwrap();
+
+    spawner
+        .spawn(count_twist_task(
+            i2c_bus,
+            0x45,
+            right_twist_count_chan,
+            Duration::from_millis(100),
+        ))
         .unwrap();
 
     spawner.spawn(mode_switch_task(green_btn_chan)).unwrap();
@@ -217,24 +233,26 @@ async fn display_update_task(
     }
 }
 
-#[embassy_executor::task]
-async fn encoder_task(
-    twist_left: &'static mut Twist,
-    twist_right: &'static mut Twist,
-    encoder_count_chan: &'static EncoderCountChan,
+#[embassy_executor::task(pool_size = 2)]
+async fn count_twist_task(
+    i2c_bus: &'static I2cBus,
+    address: u8,
+    count_chan: &'static TwistCountChan,
+    freq: Duration,
 ) {
-    let mut last_left_count = 0i16;
-    let mut last_right_count = 0i16;
+    let mut twist = QwiicTwist::new(I2cDevice::new(i2c_bus), address);
+    let mut last_count = 0i16;
+    let mut buf = [0u8; 2];
 
     loop {
-        let left_count = twist_left.get_count().await;
-        let right_count = twist_right.get_count().await;
-        if left_count != last_left_count || right_count != last_right_count {
-            encoder_count_chan.send((left_count, right_count)).await;
-            (last_left_count, last_right_count) = (left_count, right_count);
+        twist.get_count(&mut buf).await.unwrap();
+        let count = i16::from_le_bytes(buf);
+        if count != last_count {
+            count_chan.send(count).await;
+            last_count = count;
         }
 
-        Timer::after(Duration::from_millis(100)).await;
+        Timer::after(freq).await;
     }
 }
 
@@ -252,32 +270,56 @@ async fn green_button_task(input: Input<'static>, green_press_chan: &'static Pre
 
 #[embassy_executor::task]
 async fn display_counts_task(
-    encoder_count_chan: &'static EncoderCountChan,
+    left_twist_count_chan: &'static TwistCountChan,
+    right_twist_count_chan: &'static TwistCountChan,
     framebuffer_signal: &'static Signal<NoopRawMutex, ()>,
     framebuffer: &'static DisplayFrameBuffer,
 ) {
-    let style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
+    let text_style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
+    let rect_style = PrimitiveStyleBuilder::new()
+        .stroke_color(Rgb565::BLUE)
+        .fill_color(Rgb565::WHITE)
+        .build();
 
-    let mut last_encoder_left: i16 = 0;
-    let mut last_encoder_right: i16 = 0;
+    let mut left_count: i16 = 0;
+    let mut right_count: i16 = 0;
+    let mut toggle = false;
 
     loop {
-        let (encoder_left, encoder_right) = encoder_count_chan.receive().await;
-        if encoder_left == last_encoder_left && encoder_right == last_encoder_right {
-            continue;
+        match select(
+            left_twist_count_chan.receive(),
+            right_twist_count_chan.receive(),
+        )
+        .await
+        {
+            Either::First(count) => left_count = count,
+            Either::Second(count) => right_count = count,
         }
-        (last_encoder_left, last_encoder_right) = (encoder_left, encoder_right);
+        toggle = !toggle;
 
         {
             let mut framebuffer = framebuffer.lock().await;
             framebuffer.clear(RgbColor::BLACK);
             Text::new(
-                &alloc::format!("Left: {} Right: {}", last_encoder_left, last_encoder_right),
+                &alloc::format!("Left: {} Right: {}", left_count, right_count),
                 Point::new(0, 30),
-                style,
+                text_style,
             )
             .draw(&mut *framebuffer)
             .unwrap();
+
+            if toggle {
+                Rectangle::new(
+                    Point { x: 100, y: 100 },
+                    Size {
+                        width: 28,
+                        height: 28,
+                    },
+                )
+                .into_styled(rect_style)
+                .draw(&mut *framebuffer)
+                .unwrap();
+            }
         }
         framebuffer_signal.signal(());
     }
