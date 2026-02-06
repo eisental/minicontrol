@@ -18,6 +18,7 @@ use minicontrol::press::PressEvent;
 use minicontrol::twist::QwiicTwist;
 
 use defmt::info;
+
 use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::channel::Channel;
@@ -76,6 +77,9 @@ type DisplayFrameBuffer = Mutex<
     Framebuffer<Rgb565, RawU16, LittleEndian, 128, 128, { buffer_size::<Rgb565>(128, 128) }>,
 >;
 
+const SSID: &str = env!("SSID");
+const PASSWORD: &str = env!("PASSWORD");
+
 #[allow(
     clippy::large_stack_frames,
     reason = "it's not unusual to allocate larger buffers etc. in main"
@@ -98,10 +102,17 @@ async fn main(spawner: Spawner) {
 
     info!("Embassy initialized!");
 
-    let radio_init = esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller");
-    let (mut _wifi_controller, _interfaces) =
-        esp_radio::wifi::new(&radio_init, peripherals.WIFI, Default::default())
-            .expect("Failed to initialize Wi-Fi controller");
+    // WiFi
+    let wifi = esp_embassy_wifihelper::WifiStack::new(
+        spawner,
+        peripherals.WIFI,
+        SSID.try_into().unwrap(),
+        PASSWORD.try_into().unwrap(),
+    );
+
+    info!("Wifi initialized, waiting for connection...");
+    let config = wifi.wait_for_connected().await.unwrap();
+    info!("Wifi connected with IP: {}", config.address);
 
     // SPI Display Setup
     let spi_bus = Spi::new(

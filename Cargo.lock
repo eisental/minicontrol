@@ -33,6 +33,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e1b586273c5702936fe7b7d6896644d8be71e6314cfe09d3167c95f712589e8"
 
 [[package]]
+name = "basic-toml"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba62675e8242a4c4e806d12f11d136e626e6c8361d6b829310732241652a178a"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "bitfield"
 version = "0.19.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -393,6 +402,23 @@ dependencies = [
 
 [[package]]
 name = "embassy-net"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed041cc19a603d657124fddefdcbe5ef8bd60e77d972793ebb57de93394f5949"
+dependencies = [
+ "document-features",
+ "embassy-net-driver",
+ "embassy-sync 0.6.2",
+ "embassy-time 0.4.0",
+ "embedded-io-async 0.6.1",
+ "embedded-nal-async",
+ "heapless 0.8.0",
+ "managed",
+ "smoltcp",
+]
+
+[[package]]
+name = "embassy-net"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0558a231a47e7d4a06a28b5278c92e860f1200f24821d2f365a2f40fe3f3c7b2"
@@ -401,7 +427,7 @@ dependencies = [
  "document-features",
  "embassy-net-driver",
  "embassy-sync 0.7.2",
- "embassy-time",
+ "embassy-time 0.5.0",
  "embedded-io-async 0.6.1",
  "embedded-nal-async",
  "heapless 0.8.0",
@@ -445,6 +471,22 @@ dependencies = [
  "futures-core",
  "futures-sink",
  "heapless 0.8.0",
+]
+
+[[package]]
+name = "embassy-time"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f820157f198ada183ad62e0a66f554c610cdcd1a9f27d4b316358103ced7a1f8"
+dependencies = [
+ "cfg-if",
+ "critical-section",
+ "document-features",
+ "embassy-time-driver",
+ "embedded-hal 0.2.7",
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
+ "futures-util",
 ]
 
 [[package]]
@@ -661,10 +703,25 @@ dependencies = [
  "defmt 1.0.1",
  "document-features",
  "enumset",
- "esp-config",
+ "esp-config 0.6.1",
  "esp-sync",
  "linked_list_allocator",
  "rlsf",
+]
+
+[[package]]
+name = "esp-bootloader-esp-idf"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a093dbdc64b0288baacc214c2e8c2f3f13ecbf979c36ee2f63797ecf22538f1"
+dependencies = [
+ "cfg-if",
+ "document-features",
+ "embedded-storage",
+ "esp-config 0.5.0",
+ "esp-rom-sys",
+ "jiff",
+ "strum",
 ]
 
 [[package]]
@@ -677,12 +734,25 @@ dependencies = [
  "defmt 1.0.1",
  "document-features",
  "embedded-storage",
- "esp-config",
+ "esp-config 0.6.1",
  "esp-hal-procmacros",
- "esp-metadata-generated",
+ "esp-metadata-generated 0.3.0",
  "esp-rom-sys",
  "jiff",
  "strum",
+]
+
+[[package]]
+name = "esp-config"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "abd4a8db4b72794637a25944bc8d361c3cc271d4f03987ce8741312b6b61529c"
+dependencies = [
+ "document-features",
+ "esp-metadata-generated 0.1.0",
+ "evalexpr",
+ "serde",
+ "serde_yaml",
 ]
 
 [[package]]
@@ -692,10 +762,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "102871054f8dd98202177b9890cb4b71d0c6fe1f1413b7a379a8e0841fc2473c"
 dependencies = [
  "document-features",
- "esp-metadata-generated",
+ "esp-metadata-generated 0.3.0",
  "serde",
  "serde_yaml",
  "somni-expr",
+]
+
+[[package]]
+name = "esp-embassy-wifihelper"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91ffe2e05d5e99388e81277f5278ed06a3a0373ae2f362cef3d6c0353efc3124"
+dependencies = [
+ "cfg-if",
+ "defmt 1.0.1",
+ "embassy-executor",
+ "embassy-net 0.6.0",
+ "embassy-sync 0.7.2",
+ "embassy-time 0.5.0",
+ "esp-alloc",
+ "esp-bootloader-esp-idf 0.2.0",
+ "esp-hal",
+ "esp-radio",
+ "esp-rtos",
+ "esp-wifi-sys",
+ "heapless 0.9.2",
+ "smoltcp",
 ]
 
 [[package]]
@@ -724,9 +816,9 @@ dependencies = [
  "embedded-io-async 0.6.1",
  "embedded-io-async 0.7.0",
  "enumset",
- "esp-config",
+ "esp-config 0.6.1",
  "esp-hal-procmacros",
- "esp-metadata-generated",
+ "esp-metadata-generated 0.3.0",
  "esp-riscv-rt",
  "esp-rom-sys",
  "esp-sync",
@@ -766,6 +858,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "esp-metadata"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6fbc1d166be84c0750f121e95c8989ddebd7e7bdd86af3594a6cfb34f039650"
+dependencies = [
+ "anyhow",
+ "basic-toml",
+ "indexmap",
+ "proc-macro2",
+ "quote",
+ "serde",
+ "strum",
+]
+
+[[package]]
+name = "esp-metadata-generated"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "189d36b8c8a752bdebec67fd02a15ebb1432feea345553749bca7ce2393cc795"
+dependencies = [
+ "esp-metadata",
+]
+
+[[package]]
 name = "esp-metadata-generated"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -780,9 +896,9 @@ dependencies = [
  "cfg-if",
  "defmt 1.0.1",
  "document-features",
- "esp-config",
+ "esp-config 0.6.1",
  "esp-hal",
- "esp-metadata-generated",
+ "esp-metadata-generated 0.3.0",
  "esp-sync",
  "esp-wifi-sys",
 ]
@@ -805,10 +921,10 @@ dependencies = [
  "embedded-io-async 0.7.0",
  "enumset",
  "esp-alloc",
- "esp-config",
+ "esp-config 0.6.1",
  "esp-hal",
  "esp-hal-procmacros",
- "esp-metadata-generated",
+ "esp-metadata-generated 0.3.0",
  "esp-phy",
  "esp-radio-rtos-driver",
  "esp-sync",
@@ -848,7 +964,7 @@ checksum = "cd66cccc6dd2d13e9f33668a57717ab14a6d217180ec112e6be533de93e7ecbf"
 dependencies = [
  "cfg-if",
  "document-features",
- "esp-metadata-generated",
+ "esp-metadata-generated 0.3.0",
 ]
 
 [[package]]
@@ -866,10 +982,10 @@ dependencies = [
  "embassy-time-driver",
  "embassy-time-queue-utils",
  "esp-alloc",
- "esp-config",
+ "esp-config 0.6.1",
  "esp-hal",
  "esp-hal-procmacros",
- "esp-metadata-generated",
+ "esp-metadata-generated 0.3.0",
  "esp-radio-rtos-driver",
  "esp-sync",
  "portable-atomic",
@@ -886,7 +1002,7 @@ dependencies = [
  "document-features",
  "embassy-sync 0.6.2",
  "embassy-sync 0.7.2",
- "esp-metadata-generated",
+ "esp-metadata-generated 0.3.0",
  "riscv",
  "xtensa-lx",
 ]
@@ -977,6 +1093,12 @@ dependencies = [
  "defmt 1.0.1",
  "vcell",
 ]
+
+[[package]]
+name = "evalexpr"
+version = "12.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae893d2d5e908b78f151ed89de3bfc272cdf6d368c7ed866942f98e24dea208a"
 
 [[package]]
 name = "float-cmp"
@@ -1116,6 +1238,8 @@ checksum = "7714e70437a7dc3ac8eb7e6f8df75fd8eb422675fc7678aff7364301092b1017"
 dependencies = [
  "equivalent",
  "hashbrown",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]
@@ -1232,9 +1356,9 @@ dependencies = [
  "embassy-embedded-hal",
  "embassy-executor",
  "embassy-futures",
- "embassy-net",
+ "embassy-net 0.7.1",
  "embassy-sync 0.7.2",
- "embassy-time",
+ "embassy-time 0.5.0",
  "embedded-graphics",
  "embedded-hal 1.0.0",
  "embedded-hal-async",
@@ -1242,12 +1366,14 @@ dependencies = [
  "embedded-io 0.7.1",
  "embedded-io-async 0.7.0",
  "esp-alloc",
- "esp-bootloader-esp-idf",
+ "esp-bootloader-esp-idf 0.4.0",
+ "esp-embassy-wifihelper",
  "esp-hal",
  "esp-radio",
  "esp-rtos",
  "panic-rtt-target",
  "rtt-target",
+ "rust-mqtt",
  "smoltcp",
  "ssd1351",
  "static_cell",
@@ -1497,6 +1623,17 @@ dependencies = [
  "defmt 0.3.100",
  "portable-atomic",
  "ufmt-write",
+]
+
+[[package]]
+name = "rust-mqtt"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bdc42ee279f6e2d16eee8a2447d0b771e3e885816b26a670e41e8846008ea4b4"
+dependencies = [
+ "defmt 1.0.1",
+ "embedded-io-async 0.7.0",
+ "heapless 0.9.2",
 ]
 
 [[package]]
