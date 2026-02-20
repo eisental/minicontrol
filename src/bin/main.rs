@@ -8,16 +8,18 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
+use defmt::Debug2Format;
 use embassy_futures::select::Either;
 use embassy_futures::select::select;
 use embassy_futures::yield_now;
+use embassy_sync::channel::Receiver;
 use embedded_graphics::primitives::PrimitiveStyleBuilder;
 use minicontrol::press::HoldEvent;
 use minicontrol::press::LongShortPress;
 use minicontrol::press::PressEvent;
 use minicontrol::twist::QwiicTwist;
 
-use defmt::info;
+use defmt::{error, info};
 
 use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
@@ -49,12 +51,18 @@ use embedded_graphics::{
     text::Text,
 };
 
-extern crate alloc;
-
+use serde::Deserialize;
+use serde::Serialize;
+use serde_json_core::from_slice;
 use ssd1351::builder::Builder;
 use ssd1351::mode::GraphicsMode;
 use ssd1351::prelude::SPIInterface;
 use static_cell::StaticCell;
+
+use core::fmt::Write;
+use heapless::String;
+
+extern crate alloc;
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
@@ -77,8 +85,11 @@ type DisplayFrameBuffer = Mutex<
     Framebuffer<Rgb565, RawU16, LittleEndian, 128, 128, { buffer_size::<Rgb565>(128, 128) }>,
 >;
 
-const SSID: &str = env!("SSID");
-const PASSWORD: &str = env!("PASSWORD");
+const WIFI_SSID: &str = env!("WIFI_SSID");
+const WIFI_PASSWORD: &str = env!("WIFI_PASSWORD");
+const MQTT_HOST: &str = env!("MQTT_HOST");
+const MQTT_PORT: &str = env!("MQTT_PORT");
+const MQTT_CLIENT_ID: &str = "minicontrol";
 
 #[allow(
     clippy::large_stack_frames,
@@ -93,6 +104,7 @@ async fn main(spawner: Spawner) {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
+    // a heap is necessary for using the WiFi with esp_radio
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 66320);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
@@ -103,16 +115,39 @@ async fn main(spawner: Spawner) {
     info!("Embassy initialized!");
 
     // WiFi
-    let wifi = esp_embassy_wifihelper::WifiStack::new(
+    let wifi = minicontrol::wifi::WifiStack::new(
         spawner,
         peripherals.WIFI,
-        SSID.try_into().unwrap(),
-        PASSWORD.try_into().unwrap(),
+        WIFI_SSID.try_into().unwrap(),
+        WIFI_PASSWORD.try_into().unwrap(),
     );
 
     info!("Wifi initialized, waiting for connection...");
     let config = wifi.wait_for_connected().await.unwrap();
     info!("Wifi connected with IP: {}", config.address);
+
+    // MQTT
+    let mqtt_port: u16 = MQTT_PORT.parse().unwrap_or(1883);
+    let mqtt =
+        minicontrol::mqtt::MQTT::new(spawner, wifi.stack, MQTT_HOST, mqtt_port, MQTT_CLIENT_ID);
+
+    // example JSON pub/sub (remove in the future)
+    let payload = GreetingPayload { greeting: "hi" };
+    match serde_json_core::to_vec::<_, 128>(&payload) {
+        Ok(json_bytes) => {
+            defmt::info!("Publishing JSON: {=[u8]:a}", &json_bytes);
+
+            // 3. Send it to the background MQTT task!
+            mqtt.publish("minicontrol", &json_bytes).await;
+        }
+        Err(e) => {
+            defmt::error!("Failed to serialize JSON: {:?}", defmt::Debug2Format(&e));
+        }
+    }
+
+    let recv_sensors = mqtt.subscribe("sleep/#").await;
+    spawner.spawn(log_sensors(recv_sensors)).unwrap();
+    // end example
 
     // SPI Display Setup
     let spi_bus = Spi::new(
@@ -263,11 +298,17 @@ async fn count_twist_task(
     let mut buf = [0u8; 2];
 
     loop {
-        twist.get_count(&mut buf).await.unwrap();
-        let count = i16::from_le_bytes(buf);
-        if count != last_count {
-            count_chan.send(count).await;
-            last_count = count;
+        match twist.get_count(&mut buf).await {
+            Ok(()) => {
+                let count = i16::from_le_bytes(buf);
+                if count != last_count {
+                    count_chan.send(count).await;
+                    last_count = count;
+                }
+            }
+            Err(_) => {
+                error!("I2c error while getting twist {} count", address)
+            }
         }
 
         Timer::after(freq).await;
@@ -318,13 +359,19 @@ async fn display_counts_task(
         {
             let mut framebuffer = framebuffer.lock().await;
             framebuffer.clear(RgbColor::BLACK);
-            Text::new(
-                &alloc::format!("Left: {} Right: {}", left_count, right_count),
-                Point::new(0, 30),
-                text_style,
+
+            let mut display_text: String<64> = String::new();
+            core::write!(
+                &mut display_text,
+                "Left: {} Right: {}",
+                left_count,
+                right_count
             )
-            .draw(&mut *framebuffer)
             .unwrap();
+
+            Text::new(&display_text, Point::new(0, 30), text_style)
+                .draw(&mut *framebuffer)
+                .unwrap();
 
             if toggle {
                 Rectangle::new(
@@ -391,5 +438,64 @@ async fn animation_test_task(
 
         framebuffer_signal.signal(());
         yield_now().await;
+    }
+}
+
+// temp code for logging incoming MQTT sensor data
+
+#[derive(Deserialize, Debug)]
+struct SleepSensorsPayload {
+    // timestamp: f32,
+    // pressure: f32,
+    temp_outside: f32,
+    // temp_inside: f32,
+    // humidity: f32,
+    co2: u16,
+}
+
+#[derive(Serialize, Debug)]
+struct GreetingPayload<'a> {
+    greeting: &'a str,
+}
+
+#[embassy_executor::task]
+async fn log_sensors(
+    recv_sensors: Receiver<'static, NoopRawMutex, minicontrol::mqtt::MqttMessage, 4>,
+) {
+    loop {
+        let msg: minicontrol::mqtt::MqttMessage = recv_sensors.receive().await;
+        // match str::from_utf8(&msg.payload) {
+        //     Ok(text) => {
+        //         // It's valid text! Log it normally.
+        //         defmt::info!("Received on {}: {}", msg.topic.as_str(), text);
+        //     }
+        //     Err(_) => {
+        //         // It contains raw binary data, fallback to logging the raw bytes
+        //         defmt::warn!(
+        //             "Received binary payload on {}: {=[u8]}",
+        //             msg.topic.as_str(),
+        //             &msg.payload
+        //         );
+        //     }
+        // }
+
+        // from_slice returns the parsed struct AND how many bytes it read
+        match from_slice::<SleepSensorsPayload>(&msg.payload) {
+            Ok((parsed_data, _bytes_read)) => {
+                defmt::info!(
+                    "Valid JSON! Temp: {}, CO2: {}",
+                    parsed_data.temp_outside,
+                    parsed_data.co2
+                );
+            }
+            Err(e) => {
+                // If it's not valid JSON (or missing required fields), it fails gracefully
+                error!(
+                    "Failed to parse JSON on {}: {:?}",
+                    msg.topic.as_str(),
+                    Debug2Format(&e)
+                );
+            }
+        }
     }
 }

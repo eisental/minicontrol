@@ -7,6 +7,12 @@
 	"settings": {
 		"rust-analyzer.cargo.target": "riscv32imc-unknown-none-elf",
 		"rust-analyzer.check.command": "clippy",
-		"rust-analyzer.checkOnSave": true
+		"rust-analyzer.checkOnSave": true,
+		"rust-analyzer.cargo.extraEnv": {
+			"WIFI_SSID": "",
+			"WIFI_PASSWORD": "",
+			"MQTT_HOST": "",
+			"MQTT_PORT": ""
+		}
 	}
 }

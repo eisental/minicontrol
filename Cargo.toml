@@ -28,6 +28,7 @@ embassy-net = { version = "0.7.1", features = [
   "medium-ethernet",
   "tcp",
   "udp",
+  "dns",
 ] }
 embedded-io = { version = "0.7.1", features = ["defmt"] }
 embedded-io-async = { version = "0.7.0", features = ["defmt"] }
@@ -71,17 +72,17 @@ embedded-hal = "1.0.0"
 embassy-embedded-hal = "0.5.0"
 embedded-hal-async = "1.0.0"
 embassy-futures = "0.1.2"
-esp-embassy-wifihelper = { version = "0.3.1", features = ["defmt", "esp32c3"] }
-rust-mqtt = { version = "0.4.1", default-features = false, features = [
+rust-mqtt = { version = "0.3.0", default-features = false, features = [
   "defmt",
-  "v5",
 ] }
+heapless = "0.9.2"
+serde = { version = "1.0", default-features = false, features = ["derive"] }
+serde-json-core = "0.6.0"
 
 [profile.dev]
 # Rust debug is too slow.
 # For debug builds always builds with some optimization
 opt-level = "s"
-test = false
 
 [profile.release]
 codegen-units = 1        # LLVM can perform better optimizations using a single thread
@@ -91,4 +92,3 @@ incremental = false
 lto = 'fat'
 opt-level = 's'
 overflow-checks = false
-test = false
