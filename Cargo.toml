@@ -22,7 +22,7 @@ esp-rtos = { version = "0.2.0", features = [
 defmt = "1.0.1"
 esp-bootloader-esp-idf = { version = "0.4.0", features = ["defmt", "esp32c3"] }
 
-embassy-net = { version = "0.7.1", features = [
+embassy-net = { version = "0.8.0", features = [
   "defmt",
   "dhcpv4",
   "medium-ethernet",
@@ -72,8 +72,10 @@ embedded-hal = "1.0.0"
 embassy-embedded-hal = "0.5.0"
 embedded-hal-async = "1.0.0"
 embassy-futures = "0.1.2"
-rust-mqtt = { version = "0.3.0", default-features = false, features = [
+rust-mqtt = { version = "0.4.1", default-features = false, features = [
   "defmt",
+  "bump",
+  "v5",
 ] }
 heapless = "0.9.2"
 serde = { version = "1.0", default-features = false, features = ["derive"] }

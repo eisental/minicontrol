@@ -10,14 +10,21 @@ use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::channel::{Channel, Receiver, Sender};
 use embassy_time::{Duration, Ticker, Timer};
 
-use rust_mqtt::client::client::MqttClient;
-use rust_mqtt::client::client_config::{ClientConfig, MqttVersion};
-use rust_mqtt::packet::v5::publish_packet::QualityOfService;
-use rust_mqtt::packet::v5::reason_codes::ReasonCode;
-use rust_mqtt::utils::rng_generator::CountingRng;
+use rust_mqtt::Bytes;
+use rust_mqtt::buffer::BumpBuffer;
+use rust_mqtt::client::event::Event;
+use rust_mqtt::client::options::SubscriptionOptions;
+use rust_mqtt::client::{Client, MqttError};
+use rust_mqtt::types::{MqttString, TooLargeToEncode, TopicFilter, TopicName};
 use static_cell::StaticCell;
 
 use defmt::{error, info};
+
+const MAX_SUBSCRIPTIONS: usize = 5;
+const RECEIVE_MAXIMUM: usize = 1;
+const SEND_MAXIMUM: usize = 1;
+
+type MqttClient<'a, W, B> = Client<'a, W, B, MAX_SUBSCRIPTIONS, RECEIVE_MAXIMUM, SEND_MAXIMUM>;
 
 #[derive(Clone)]
 pub struct MqttMessage {
@@ -43,7 +50,6 @@ pub enum MqttCommand {
 static CMD_CHANNEL: StaticCell<Channel<NoopRawMutex, MqttCommand, 8>> = StaticCell::new();
 
 // A pool of StaticCells to allocate subscription channels dynamically but with 'static lifetimes
-const MAX_SUBSCRIPTIONS: usize = 5;
 static SUB_CHANNELS_POOL: [StaticCell<Channel<NoopRawMutex, MqttMessage, 4>>; MAX_SUBSCRIPTIONS] = [
     StaticCell::new(),
     StaticCell::new(),
@@ -57,8 +63,7 @@ static mut SUB_CHANNEL_INDEX: usize = 0;
 
 static TCP_RX_BUFFER: StaticCell<[u8; 4096]> = StaticCell::new();
 static TCP_TX_BUFFER: StaticCell<[u8; 4096]> = StaticCell::new();
-static MQTT_RX_BUFFER: StaticCell<[u8; 1024]> = StaticCell::new();
-static MQTT_TX_BUFFER: StaticCell<[u8; 1024]> = StaticCell::new();
+static MQTT_BUFFER: StaticCell<[u8; 1024]> = StaticCell::new();
 
 pub struct MQTT {
     cmd_sender: Sender<'static, NoopRawMutex, MqttCommand, 8>,
@@ -146,8 +151,7 @@ async fn mqtt_background_task(
 ) {
     let tcp_rx = TCP_RX_BUFFER.init_with(|| [0; 4096]);
     let tcp_tx = TCP_TX_BUFFER.init_with(|| [0; 4096]);
-    let mqtt_rx = MQTT_RX_BUFFER.init_with(|| [0; 1024]);
-    let mqtt_tx = MQTT_TX_BUFFER.init_with(|| [0; 1024]);
+    let mqtt_buf = MQTT_BUFFER.init_with(|| [0; 1024]);
 
     // A local vector to hold active subscriptions and their routing channels
     let mut router: Vec<(String, Sender<'static, NoopRawMutex, MqttMessage, 4>)> = Vec::new();
@@ -168,6 +172,7 @@ async fn mqtt_background_task(
 
         info!("Resolved {} to {:?}", host, ip_address);
 
+        let mut mqtt_buf = BumpBuffer::new(mqtt_buf);
         let mut socket = TcpSocket::new(stack, tcp_rx, tcp_tx);
         socket.set_timeout(Some(Duration::from_secs(10)));
 
@@ -175,10 +180,9 @@ async fn mqtt_background_task(
             info!("TCP Connected! Starting session...");
             socket.set_timeout(None); // MQTT is now responsible for keeping the socket alive
             let _ = mqtt_session(
-                socket,
+                &mut socket,
+                &mut mqtt_buf,
                 client_id,
-                mqtt_rx,
-                mqtt_tx,
                 cmd_channel,
                 &mut router,
             )
@@ -190,27 +194,112 @@ async fn mqtt_background_task(
     }
 }
 
+#[derive(defmt::Format)]
+enum PubSubError<'s> {
+    InvalidTopic(TooLargeToEncode),
+    Mqtt(MqttError<'s>),
+}
+
+impl<'s> From<MqttError<'s>> for PubSubError<'s> {
+    fn from(error: MqttError<'s>) -> Self {
+        PubSubError::Mqtt(error)
+    }
+}
+
+impl<'s> From<TooLargeToEncode> for PubSubError<'s> {
+    fn from(error: TooLargeToEncode) -> Self {
+        PubSubError::InvalidTopic(error)
+    }
+}
+
+// TODO externalize subscription options
+async fn mqtt_subscribe<'a>(
+    client: &mut MqttClient<'a, &mut TcpSocket<'a>, BumpBuffer<'a>>,
+    topic: &str,
+) -> Result<(), PubSubError<'a>> {
+    let topic = MqttString::try_from(topic)?;
+    let topic = unsafe { TopicFilter::new_unchecked(topic) };
+    client
+        .subscribe(
+            topic,
+            SubscriptionOptions {
+                retain_as_published: false, //?
+                retain_handling: rust_mqtt::client::options::RetainHandling::AlwaysSend, //?
+                no_local: false,
+                qos: rust_mqtt::types::QoS::AtLeastOnce,
+            },
+        )
+        .await
+        .map_err(|e| PubSubError::Mqtt(e.clone()))?;
+
+    // TODO: poll for ack
+    Ok(())
+}
+
+async fn mqtt_unsubscribe<'a>(
+    client: &mut MqttClient<'a, &mut TcpSocket<'a>, BumpBuffer<'a>>,
+    topic: &str,
+) -> Result<(), PubSubError<'a>> {
+    let topic = MqttString::try_from(topic)?;
+    let topic = unsafe { TopicFilter::new_unchecked(topic) };
+    client.unsubscribe(topic).await?;
+
+    // TODO: poll for ack
+    Ok(())
+}
+
+async fn mqtt_publish<'a>(
+    client: &mut MqttClient<'a, &mut TcpSocket<'a>, BumpBuffer<'a>>,
+    topic: &str,
+    payload: Vec<u8>,
+) -> Result<(), PubSubError<'a>> {
+    let topic = MqttString::try_from(topic)?;
+    let topic = unsafe { TopicName::new_unchecked(topic) };
+    let payload = Bytes::from(payload.as_slice());
+    // TODO: wait for ack
+    let _ = client
+        .publish(
+            &rust_mqtt::client::options::PublicationOptions {
+                retain: false,
+                topic,
+                qos: rust_mqtt::types::QoS::AtLeastOnce,
+            },
+            payload,
+        )
+        .await?;
+
+    Ok(())
+}
+
 async fn mqtt_session<'a>(
-    socket: TcpSocket<'a>,
+    socket: &mut TcpSocket<'a>,
+    mqtt_buffer: &'a mut BumpBuffer<'a>,
     client_id: &'static str,
-    mqtt_rx: &mut [u8],
-    mqtt_tx: &mut [u8],
     cmd_channel: &'static Channel<NoopRawMutex, MqttCommand, 8>,
     router: &mut Vec<(String, Sender<'static, NoopRawMutex, MqttMessage, 4>)>,
 ) -> Result<(), ()> {
-    let mut config = ClientConfig::new(MqttVersion::MQTTv5, CountingRng(20000));
-    config.add_client_id(client_id);
-    config.max_packet_size = 1024;
-    config.keep_alive = 60;
-
-    let mut client = MqttClient::<_, 5, _>::new(socket, mqtt_rx, 1024, mqtt_tx, 1024, config);
-    client.connect_to_broker().await.map_err(|_| ())?;
+    let mut client = MqttClient::new(mqtt_buffer);
+    let options = rust_mqtt::client::options::ConnectOptions {
+        clean_start: true,
+        keep_alive: rust_mqtt::config::KeepAlive::Seconds(60),
+        user_name: None,
+        password: None,
+        session_expiry_interval: rust_mqtt::config::SessionExpiryInterval::EndOnDisconnect,
+        will: None,
+    };
+    client
+        .connect(socket, &options, MqttString::try_from(client_id).ok())
+        .await
+        .inspect_err(|e| error!("Error connecting to MQTT broker: {:?}", e))
+        .map_err(|_| ())?;
 
     // Resubscribe top topics after disconnection
     if !router.is_empty() {
         for (topic, _) in router.iter() {
-            info!("Resubscribing to: {}", topic.as_str());
-            client.subscribe_to_topic(topic).await.map_err(|_| ())?;
+            match mqtt_subscribe(&mut client, topic.as_str()).await {
+                Ok(()) => info!("Resubscribed to {}", topic.as_str()),
+                Err(e) => error!("Error resubscribing to {}: {:?}", topic.as_str(), e),
+            }
         }
     }
 
@@ -220,67 +309,74 @@ async fn mqtt_session<'a>(
     loop {
         // handle incoming messages, commands from users, and keep-alive pings
         match select3(
-            client.receive_message(),
+            client.poll_header(),
             cmd_channel.receive(),
             ping_ticker.next(),
         )
         .await
         {
             // 1. INCOMING MQTT MESSAGE
-            Either3::First(rx_result) => {
-                let (topic, payload) = rx_result.map_err(|e| error!("Error 1: {:?}", e))?; // TODO better err handling
-
-                // Route the message to the correct channel
-                for (sub_topic, sender) in router.iter() {
-                    // Note: This is exact matching. For wildcards (+/#), you'd add logic here.
-                    if topic_matches(sub_topic, topic) {
-                        let _ = sender.try_send(MqttMessage {
-                            topic: String::from(topic),
-                            payload: payload.to_vec(),
-                        });
+            Either3::First(event) => match event {
+                Ok(header) => {
+                    match client.poll_body(header).await {
+                        Ok(Event::Publish(p)) => {
+                            // Route the message to the correct channel
+                            for (sub_topic, sender) in router.iter() {
+                                let topic = p.topic.as_ref();
+                                // TODO: possibly use rust-mqtt topic matching logic
+                                if topic_matches(sub_topic, topic) {
+                                    let _ = sender.try_send(MqttMessage {
+                                        topic: String::from(p.topic.as_ref()),
+                                        payload: p.message.to_vec(),
+                                    });
+                                }
+                            }
+                        }
+                        Ok(event) => {
+                            info!("Received event: {:?}", event);
+                        }
+                        Err(e) => {
+                            error!("Error polling body: {:?}", e);
+                            break Err(()); // TODO maybe not break
+                        }
                     }
                 }
-            }
+                Err(e) => {
+                    error!("Error polling body: {:?}", e);
+                    break Err(()); // TODO maybe not break
+                }
+            },
 
             // 2. INCOMING COMMAND FROM APP
             Either3::Second(cmd) => match cmd {
                 MqttCommand::Publish { topic, payload } => {
-                    match client
-                        .send_message(&topic, &payload, QualityOfService::QoS1, false)
+                    let _ = mqtt_publish(&mut client, topic.as_str(), payload)
                         .await
-                    {
-                        Ok(()) => {}
-                        Err(ReasonCode::NoMatchingSubscribers) => {
-                            info!(
-                                "Published to {}, but broker reported no active subscribers.",
-                                topic.as_str()
-                            );
-                        }
-                        Err(e) => {
-                            error!("failed to publish to {}: {:?}", topic.as_str(), e);
-                        }
-                    }
+                        .inspect_err(|e| error!("Error publishing to {}: {:?}", topic.as_str(), e));
                 }
                 MqttCommand::Subscribe { topic, sender } => {
-                    client
-                        .subscribe_to_topic(&topic)
+                    let _ = mqtt_subscribe(&mut client, topic.as_str())
                         .await
-                        .map_err(|e| error!("Error 3: {:?}", e))?; // TODO err handling
+                        .inspect_err(|e| {
+                            error!("Error subscribing to {}: {:?}", topic.as_str(), e)
+                        });
                     router.push((topic, sender));
                 }
                 MqttCommand::Unsubscribe { topic } => {
-                    client
-                        .unsubscribe_from_topic(&topic)
+                    let _ = mqtt_unsubscribe(&mut client, topic.as_str())
                         .await
-                        .map_err(|e| error!("Error 4: {:?}", e))?; // TODO err handling
+                        .inspect_err(|e| {
+                            error!("Error unsubscribing from {}: {:?}", topic.as_str(), e)
+                        });
                     router.retain(|(t, _)| t != &topic);
                 }
                 MqttCommand::UnsubscribeAll => {
                     for (topic, _) in router.iter() {
-                        client
-                            .unsubscribe_from_topic(topic)
+                        mqtt_unsubscribe(&mut client, topic.as_str())
                             .await
-                            .map_err(|e| error!("Error 5: {:?}", e))?; // TODO err handling
+                            .map_err(|e| {
+                                error!("Error unsubscribing from {}: {:?}", topic.as_str(), e)
+                            })?; // TODO log success?
                     }
                     router.clear();
                 }
@@ -289,12 +385,14 @@ async fn mqtt_session<'a>(
             // 3. PING TICKER
             Either3::Third(_) => {
                 info!("sending ping");
-                client
-                    .send_ping()
+                let _ = client
+                    .ping()
                     .await
-                    .map_err(|e| error!("Error 6: {:?}", e))?; // TODO err handling
+                    .inspect_err(|e| error!("Error sending ping: {:?}", e));
             }
         }
+
+        unsafe { client.buffer().reset() };
     }
 }
 
